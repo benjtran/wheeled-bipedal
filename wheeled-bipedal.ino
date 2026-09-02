@@ -2,26 +2,45 @@
 #include <ESP32Encoder.h>
 #include <Wire.h>
 #include <math.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
 #include "TWAI_CAN_MI_Motor.h"
 
 // ==========================================================
 //  PIN & CONFIG CONSTANTS
 // ==========================================================
-const int ENA = 25, IN1 = 26, IN2 = 27;      // right wheel (motor 1)
-const int ENB = 32, IN3 = 33, IN4 = 14;      // left wheel  (motor 2)
-const int M1_A = 34, M1_B = 35;              // right encoder
-const int M2_A = 16, M2_B = 17;              // left encoder
+// ---- BTS7960 wheel drivers (replaces the L298N) ----
+// Right motor - BTS7960 #1
+const int R_RPWM = 25;
+const int R_LPWM = 26;
+// Left motor - BTS7960 #2
+const int L_RPWM = 32;
+const int L_LPWM = 33;
+// R_EN / L_EN / VCC on both modules are wired straight to 3.3V,
+// so both drivers are always enabled - nothing to drive for that in software.
+
+// ---- Encoders ----
+// Pin<->side mapping confirmed by the hardware test sketch: enc1 reads
+// the RIGHT wheel and lives on 16/17, enc2 reads the LEFT wheel and
+// lives on 34/35 (crossed from what the schematic would suggest).
+const int M1_A = 16, M1_B = 17;   // right
+const int M2_A = 34, M2_B = 35;   // left
+
 const int I2C_SDA = 18, I2C_SCL = 19;
 const byte IMU_ADDR = 0x68;
 
 const int PWM_FREQ = 20000, PWM_RES = 10;
-const int PWM_MAX  = (1 << PWM_RES) - 1;     // 1023
+const int PWM_MAX  = (1 << PWM_RES) - 1;
 
-const float COUNTS_PER_OUTPUT_REV = 64.0 * 4.0 * 270.0;   // 69120
+// Gear ratio changed 270:1 -> 50:1. Assumes the encoder disc is still
+// 64 CPR pre-gearbox like the old motors - verify against the new
+// motor's datasheet if position/velocity numbers look off by a
+// constant factor.
+const float COUNTS_PER_OUTPUT_REV = 64.0 * 4.0 * 50.0;   // = 12800
 
-// Loop timing
-const float CONTROL_HZ = 200.0;                       // balance loop rate
-const unsigned long CONTROL_US = 1000000UL / 200;     // 5000 us period
+const float CONTROL_HZ = 200.0;
+const unsigned long CONTROL_US = 1000000UL / 200;
 
 // ==========================================================
 //  GLOBAL OBJECTS & STATE
@@ -29,30 +48,97 @@ const unsigned long CONTROL_US = 1000000UL / 200;     // 5000 us period
 ESP32Encoder enc1, enc2;
 MI_Motor_ joint1, joint2;
 
-// --- estimated robot state (Layer 1 output) ---
 struct RobotState {
-  float pitch;        // fused tilt angle (deg) — 0 = upright
-  float pitchRate;    // tilt angular velocity (deg/s)
-  float wheelPosR;    // right wheel position (revs)
-  float wheelPosL;    // left wheel position (revs)
-  float wheelVelR;    // right wheel velocity (rev/s)
-  float wheelVelL;    // left wheel velocity (rev/s)
+  float pitch;
+  float pitchRate;
+  float wheelPosR, wheelPosL;
+  float wheelVelR, wheelVelL;
 };
 RobotState state;
 
-// --- gyro bias, found at startup ---
 float gyroBiasX = 0, gyroBiasY = 0, gyroBiasZ = 0;
+unsigned long loopCounter = 0;
 
 // ==========================================================
-//  IMU  (raw read + fused angle)
+//  JOINTS
+// ==========================================================
+const float J1_MIN = -0.319, J1_MAX = 0.233;
+const float J2_MIN = -0.515, J2_MAX = 0.039;
+float standJ1 = 0.21;
+float standJ2 = -0.49;
+const float POSE_SPEED = 0.3;
+const float RELEASE_SPEED = 0.05;              // slower than POSE_SPEED, for a gentle lower
+const unsigned long RELEASE_SETTLE_MS = 1500;  // time given to reach the rest position before cutting power
+
+// "Down"/relaxed target angles - placeholders (currently just the opposite
+// joint limits from the standing pose). Watch the first release and adjust
+// restJ1/restJ2 to whatever position is actually "legs down" for your linkage.
+float restJ1 = J1_MAX;
+float restJ2 = J2_MIN;
+
+bool jointsHolding = false;
+
+float clampJ1(float v){ return v < J1_MIN ? J1_MIN : (v > J1_MAX ? J1_MAX : v); }
+float clampJ2(float v){ return v < J2_MIN ? J2_MIN : (v > J2_MAX ? J2_MAX : v); }
+
+// ==========================================================
+//  BALANCE CONTROLLER + DEAD-ZONE COMPENSATION
+// ==========================================================
+bool  balanceEnabled = false;
+float pitchSetpoint  = -4.0;
+
+// NOTE: Kp/Kd/Ki, DEADZONE, and TIPOVER_LIMIT below are carried over
+// unchanged from the 270:1 tune. The 50:1 gearboxes have roughly 5.4x
+// less torque and 5.4x more free speed for the same effort value, so
+// treat these as a starting point only - expect to re-tune all of
+// them (and re-find DEADZONE's stiction point) once you start
+// balancing on the new motors.
+float Kp = 0.05;
+float Kd = 0.05;
+float Ki = 0.0;
+
+float DEADZONE = 0.14;   // measured wheel stiction point (effort where wheels just start moving)
+
+float integralError = 0.0;
+float lastEffort = 0.0;
+float lastRawEffort = 0.0;
+float lastP = 0.0, lastD = 0.0, lastI = 0.0;   // split-out PID terms for telemetry
+const float TIPOVER_LIMIT = 40.0;
+
+// ---- Burst data logger ('L' captures a 2.5 s full-rate trace as CSV) ----
+#define LOG_N 500
+struct LogSample { float t, pitch, rate, rawEff, eff, P, D, wR, wL; };
+LogSample logBuf[LOG_N];
+int  logIdx = 0;
+bool logging = false;
+unsigned long logStartUs = 0;
+
+void dumpLog() {
+  Serial.println("---- LOG BEGIN (t_s,pitch,rate,rawEff,eff,P,D,wR,wL) ----");
+  for (int i = 0; i < logIdx; i++) {
+    Serial.printf("%.4f,%.3f,%.2f,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f\n",
+                  logBuf[i].t, logBuf[i].pitch, logBuf[i].rate,
+                  logBuf[i].rawEff, logBuf[i].eff, logBuf[i].P, logBuf[i].D,
+                  logBuf[i].wR, logBuf[i].wL);
+  }
+  Serial.println("---- LOG END ----");
+}
+
+// ==========================================================
+//  MOTOR TEST MODE (bypasses balance to test raw motor response)
+// ==========================================================
+bool  motorTestMode = false;
+float motorTestEffort = 0.0;
+
+// ==========================================================
+//  IMU
 // ==========================================================
 void imuInit() {
   Wire.beginTransmission(IMU_ADDR);
-  Wire.write(0x6B); Wire.write(0x00);   // wake
+  Wire.write(0x6B); Wire.write(0x00);
   Wire.endTransmission();
 }
 
-// raw read: accel in g, gyro in deg/s (bias NOT removed here)
 void imuReadRaw(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
   Wire.beginTransmission(IMU_ADDR);
   Wire.write(0x3B);
@@ -61,7 +147,7 @@ void imuReadRaw(float &ax, float &ay, float &az, float &gx, float &gy, float &gz
   int16_t rAx=(Wire.read()<<8)|Wire.read();
   int16_t rAy=(Wire.read()<<8)|Wire.read();
   int16_t rAz=(Wire.read()<<8)|Wire.read();
-  Wire.read(); Wire.read();                 // skip temperature
+  Wire.read(); Wire.read();
   int16_t rGx=(Wire.read()<<8)|Wire.read();
   int16_t rGy=(Wire.read()<<8)|Wire.read();
   int16_t rGz=(Wire.read()<<8)|Wire.read();
@@ -69,7 +155,6 @@ void imuReadRaw(float &ax, float &ay, float &az, float &gx, float &gy, float &gz
   gx=rGx/131.0;   gy=rGy/131.0;   gz=rGz/131.0;
 }
 
-// Measure gyro bias while robot is held perfectly still. Call once at startup.
 void calibrateGyro(int samples = 500) {
   float sx=0, sy=0, sz=0;
   float ax,ay,az,gx,gy,gz;
@@ -83,40 +168,55 @@ void calibrateGyro(int samples = 500) {
   gyroBiasZ = sz/samples;
 }
 
-// The accelerometer-only tilt angle (deg).
-// NOTE: you must confirm which axes correspond to YOUR robot's fall direction.
-// This assumes pitch about X using ay,az — verify empirically and change if needed.
 float accelPitch(float ax, float ay, float az) {
-  return atan2(ay, az) * 180.0 / PI;
+  return atan2(ax, az) * 180.0 / PI;
 }
 
 // ==========================================================
-//  STATE ESTIMATION  (Layer 1)
-//  Fuses accel + gyro into state.pitch and state.pitchRate.
-//  Call once per control cycle with the real dt.
+//  BALANCE FUNCTION (with dead-zone comp)
+// ==========================================================
+float computeBalance(float dt) {
+  float error = pitchSetpoint - state.pitch;
+  float P = Kp * error;
+  float D = Kd * (-state.pitchRate);
+
+  integralError += error * dt;
+  if (integralError >  50) integralError =  50;
+  if (integralError < -50) integralError = -50;
+  float I = Ki * integralError;
+
+  float effort = P + D + I;
+  lastRawEffort = effort;
+  lastP = P; lastD = D; lastI = I;
+
+  if (effort >  1.0) effort =  1.0;
+  if (effort < -1.0) effort = -1.0;
+
+  if (DEADZONE > 0.0 && fabs(effort) > 0.001) {
+    if (effort > 0)  effort = DEADZONE + (1.0 - DEADZONE) * effort;
+    else             effort = -DEADZONE + (1.0 - DEADZONE) * effort;
+  }
+  return effort;
+}
+
+// ==========================================================
+//  STATE ESTIMATION
 // ==========================================================
 void updateState(float dt) {
   float ax,ay,az,gx,gy,gz;
   imuReadRaw(ax,ay,az,gx,gy,gz);
-
-  // remove gyro bias
   gx -= gyroBiasX; gy -= gyroBiasY; gz -= gyroBiasZ;
 
-  // --- pitch: pick the gyro axis that matches your fall direction ---
-  float gyroRate = gx;                 // <-- verify: which gyro axis is "tipping"?
+  float gyroRate = gy;
   float accAngle = accelPitch(ax, ay, az);
 
-  // ---- COMPLEMENTARY FILTER (your fusion lives here) ----
-  // TODO(you): tune the 0.98/0.02 weighting. Higher gyro weight = smoother
-  // but drifts more; higher accel weight = less drift but noisier.
   const float ALPHA = 0.98;
   state.pitch     = ALPHA * (state.pitch + gyroRate * dt) + (1.0 - ALPHA) * accAngle;
   state.pitchRate = gyroRate;
 
-  // --- wheels ---
   static int64_t lastC1 = 0, lastC2 = 0;
   int64_t c1 =  enc1.getCount();
-  int64_t c2 = -enc2.getCount();       // left encoder negated (leads swapped)
+  int64_t c2 = -enc2.getCount();
   state.wheelPosR = (float)c1 / COUNTS_PER_OUTPUT_REV;
   state.wheelPosL = (float)c2 / COUNTS_PER_OUTPUT_REV;
   state.wheelVelR = ((float)(c1 - lastC1) / COUNTS_PER_OUTPUT_REV) / dt;
@@ -124,7 +224,6 @@ void updateState(float dt) {
   lastC1 = c1; lastC2 = c2;
 }
 
-// seed pitch with the accelerometer angle so it doesn't start from 0
 void initStateEstimate() {
   float ax,ay,az,gx,gy,gz;
   imuReadRaw(ax,ay,az,gx,gy,gz);
@@ -133,50 +232,229 @@ void initStateEstimate() {
 }
 
 // ==========================================================
-//  WHEEL MOTORS  (Layer 0)
-//  effort is -1.0 .. +1.0 ; sign = direction, magnitude = speed
+//  WHEEL MOTORS (BTS7960: two PWM pins per motor, no direction pin)
 // ==========================================================
 void setWheelR(float effort) {
-  int dir = (effort >= 0) ? 1 : -1;
+  effort = constrain(effort, -1.0f, 1.0f);
   int duty = (int)(fabs(effort) * PWM_MAX);
-  if (duty > PWM_MAX) duty = PWM_MAX;
-  digitalWrite(IN1, dir >= 0 ? HIGH : LOW);
-  digitalWrite(IN2, dir >= 0 ? LOW  : HIGH);
-  ledcWrite(ENA, duty);
+  if (effort > 0.001f) {
+    ledcWrite(R_RPWM, duty);
+    ledcWrite(R_LPWM, 0);
+  } else if (effort < -0.001f) {
+    ledcWrite(R_RPWM, 0);
+    ledcWrite(R_LPWM, duty);
+  } else {
+    ledcWrite(R_RPWM, 0);
+    ledcWrite(R_LPWM, 0);
+  }
 }
 void setWheelL(float effort) {
-  int dir = (effort >= 0) ? 1 : -1;
+  effort = constrain(effort, -1.0f, 1.0f);
   int duty = (int)(fabs(effort) * PWM_MAX);
-  if (duty > PWM_MAX) duty = PWM_MAX;
-  digitalWrite(IN3, dir >= 0 ? HIGH : LOW);
-  digitalWrite(IN4, dir >= 0 ? LOW  : HIGH);
-  ledcWrite(ENB, duty);
+  if (effort > 0.001f) {
+    ledcWrite(L_RPWM, duty);
+    ledcWrite(L_LPWM, 0);
+  } else if (effort < -0.001f) {
+    ledcWrite(L_RPWM, 0);
+    ledcWrite(L_LPWM, duty);
+  } else {
+    ledcWrite(L_RPWM, 0);
+    ledcWrite(L_LPWM, 0);
+  }
 }
 void stopWheels() { setWheelR(0); setWheelL(0); }
 
 // ==========================================================
-//  JOINT MOTORS  (Layer 0)
+//  JOINT MOTORS
 // ==========================================================
 void prepJoint(MI_Motor_ &m, uint8_t id) {
   m.Motor_Con_Init(id); delay(100);
   m.Motor_Reset();      delay(200);
-  m.Change_Mode(SPEED_MODE); delay(200);
-  m.Set_SpeedMode(0.0); delay(100);
 }
-void enableJoint(MI_Motor_ &m) {
-  m.Change_Mode(SPEED_MODE); delay(50);
-  m.Motor_Enable();          delay(50);
-  m.Set_SpeedMode(0.0);
+void holdPose() {
+  float t1 = clampJ1(standJ1);
+  float t2 = clampJ2(standJ2);
+  joint1.Change_Mode(POS_MODE); delay(50);
+  joint1.Motor_Enable();        delay(50);
+  joint2.Change_Mode(POS_MODE); delay(50);
+  joint2.Motor_Enable();        delay(50);
+  joint1.Set_PosMode(t1, POSE_SPEED);
+  joint2.Set_PosMode(t2, POSE_SPEED);
+  jointsHolding = true;
+  Serial.printf(">>> HOLDING POSE: j1=%.3f j2=%.3f <<<\n", t1, t2);
 }
-void disableJoint(MI_Motor_ &m) {
-  m.Set_SpeedMode(0.0); delay(50);
-  m.Motor_Reset();
+void releaseJoints() {
+  float r1 = clampJ1(restJ1);
+  float r2 = clampJ2(restJ2);
+
+  Serial.println(">>> LOWERING JOINTS <<<");
+  joint1.Set_PosMode(r1, RELEASE_SPEED);
+  joint2.Set_PosMode(r2, RELEASE_SPEED);
+
+  unsigned long start = millis();
+  while (millis() - start < RELEASE_SETTLE_MS) {
+    pollJoint(joint1);
+    pollJoint(joint2);
+    delay(20);
+  }
+
+  joint1.Motor_Reset();
+  joint2.Motor_Reset();
+  jointsHolding = false;
+  Serial.println(">>> JOINTS RELEASED <<<");
 }
-void setJointSpeed(MI_Motor_ &m, float radPerSec) {
-  m.Set_SpeedMode(radPerSec);
+void pollJoint(MI_Motor_ &m) { m.Motor_Data_Updata(1); }
+
+// ==========================================================
+//  KEYBOARD
+// ==========================================================
+void handleKey(char c) {
+  switch (c) {
+    case 'H': holdPose();      break;
+    case 'R': releaseJoints(); break;
+    case 'B': balanceEnabled = true; motorTestMode = false; integralError = 0;
+              Serial.println(">>> BALANCE ON <<<"); break;
+    case ' ':
+    case 'K': balanceEnabled = false; motorTestMode = false; stopWheels();
+              Serial.println(">>> KILL <<<"); break;
+
+    // ---- capture a 2.5 s full-rate trace of the balance response ----
+    case 'L': logIdx = 0; logging = true; logStartUs = micros();
+              Serial.println(">>> LOGGING 2.5s... <<<"); break;
+
+    // ---- MOTOR TEST MODE: directly command wheel effort, bypass balance ----
+    case 'T': motorTestMode = true; balanceEnabled = false; motorTestEffort = 0;
+              Serial.println(">>> MOTOR TEST MODE (balance off) <<<"); break;
+    case '1': motorTestEffort = 0.1;  Serial.println("effort=0.1"); break;
+    case '2': motorTestEffort = 0.2;  Serial.println("effort=0.2"); break;
+    case '3': motorTestEffort = 0.3;  Serial.println("effort=0.3"); break;
+    case '5': motorTestEffort = 0.5;  Serial.println("effort=0.5"); break;
+    case '9': motorTestEffort = 1.0;  Serial.println("effort=1.0"); break;
+    case '0': motorTestEffort = 0.0;  Serial.println("effort=0.0"); break;
+    case '-': motorTestEffort = -motorTestEffort;
+              Serial.printf("effort=%.1f (flipped)\n", motorTestEffort); break;
+  }
 }
-void pollJoint(MI_Motor_ &m) {
-  m.Motor_Data_Updata(5);
+
+// ==========================================================
+//  LIVE TUNING OVER SERIAL
+// ==========================================================
+// Type "<name> <value>" and press Enter to change a value without
+// reflashing, e.g.  kp 0.08   or   deadzone 0.15
+// Type "list" to print current values.
+struct TunableParam {
+  const char* name;
+  float* value;
+};
+
+TunableParam tunables[] = {
+  {"kp",       &Kp},
+  {"kd",       &Kd},
+  {"ki",       &Ki},
+  {"deadzone", &DEADZONE},
+  {"setpoint", &pitchSetpoint},
+  {"standj1",  &standJ1},
+  {"standj2",  &standJ2},
+  {"effort",   &motorTestEffort},   // fine T-mode effort, e.g. "effort 0.06" (T mode must be on)
+};
+const int NUM_TUNABLES = sizeof(tunables) / sizeof(tunables[0]);
+
+void printTunables() {
+  Serial.println("---- current tuning values ----");
+  for (int i = 0; i < NUM_TUNABLES; i++) {
+    Serial.printf("  %-9s = %.4f\n", tunables[i].name, *(tunables[i].value));
+  }
+  Serial.println("Set with: <name> <value>   e.g. kp 0.08   (type 'list' to see this again)");
+  Serial.println("--------------------------------");
+}
+
+bool namesMatch(const char* a, const char* b) {
+  while (*a && *b) {
+    if (tolower(*a) != tolower(*b)) return false;
+    a++; b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+void processTuningLine(char* line) {
+  while (*line == ' ') line++;
+  if (strlen(line) == 0) return;
+
+  if (namesMatch(line, "list") || namesMatch(line, "help")) {
+    printTunables();
+    return;
+  }
+
+  // split into "<name> <value>" on the first space or '='
+  char* sep = line;
+  while (*sep && *sep != ' ' && *sep != '=') sep++;
+  if (*sep == '\0') {
+    Serial.printf("Unknown command '%s' (try: list)\n", line);
+    return;
+  }
+  *sep = '\0';
+  char* valueStr = sep + 1;
+  while (*valueStr == ' ' || *valueStr == '=') valueStr++;
+
+  for (int i = 0; i < NUM_TUNABLES; i++) {
+    if (namesMatch(line, tunables[i].name)) {
+      float v = atof(valueStr);
+      *(tunables[i].value) = v;
+      Serial.printf(">>> %s = %.4f <<<\n", tunables[i].name, v);
+      if (namesMatch(tunables[i].name, "standj1") || namesMatch(tunables[i].name, "standj2")) {
+        Serial.println("(press H to move the joints to the new pose)");
+      }
+      return;
+    }
+  }
+  Serial.printf("Unknown parameter '%s' (try: list)\n", line);
+}
+
+// Legacy single-key commands (H,R,B,K,space,T,digits,-,?) still act
+// instantly, byte by byte, unchanged - this keeps the kill switch
+// (space/K) instant with no Enter needed. Anything that starts with a
+// letter is instead treated as the start of a typed tuning command
+// (e.g. "kp 0.08") and buffered until Enter, since it needs several
+// characters before it means anything.
+char serialLineBuf[40];
+int  serialLineLen = 0;
+bool inTuningLine = false;
+
+bool isLegacyKey(char c) {
+  if (c == 'H' || c == 'R' || c == 'B' || c == 'K' || c == 'T' ||
+      c == 'L' || c == ' ' || c == '-' || c == '?') return true;
+  if (c >= '0' && c <= '9') return true;
+  return false;
+}
+
+void readSerialCommands() {
+  while (Serial.available()) {
+    char c = Serial.read();
+
+    if (!inTuningLine) {
+      if (c == '\n' || c == '\r') continue;
+      if (isLegacyKey(c)) {
+        handleKey(c);
+        continue;
+      }
+      if (isalpha(c)) {
+        inTuningLine = true;
+        serialLineLen = 0;
+        serialLineBuf[serialLineLen++] = c;
+        continue;
+      }
+      continue;  // stray punctuation at line start - ignore
+    }
+
+    if (c == '\n' || c == '\r') {
+      serialLineBuf[serialLineLen] = '\0';
+      processTuningLine(serialLineBuf);
+      inTuningLine = false;
+      serialLineLen = 0;
+    } else if (serialLineLen < (int)sizeof(serialLineBuf) - 1) {
+      serialLineBuf[serialLineLen++] = c;
+    }
+  }
 }
 
 // ==========================================================
@@ -186,10 +464,10 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
-  pinMode(IN1,OUTPUT); pinMode(IN2,OUTPUT);
-  pinMode(IN3,OUTPUT); pinMode(IN4,OUTPUT);
-  ledcAttach(ENA, PWM_FREQ, PWM_RES);
-  ledcAttach(ENB, PWM_FREQ, PWM_RES);
+  ledcAttach(R_RPWM, PWM_FREQ, PWM_RES);
+  ledcAttach(R_LPWM, PWM_FREQ, PWM_RES);
+  ledcAttach(L_RPWM, PWM_FREQ, PWM_RES);
+  ledcAttach(L_LPWM, PWM_FREQ, PWM_RES);
   stopWheels();
 
   ESP32Encoder::useInternalWeakPullResistors = puType::up;
@@ -198,6 +476,7 @@ void setup() {
   enc1.clearCount(); enc2.clearCount();
 
   Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(400000);   // 400 kHz fast-mode I2C: ~4x quicker IMU reads = less loop latency
   imuInit();
 
   Motor_CAN_Init();
@@ -205,39 +484,98 @@ void setup() {
   prepJoint(joint1, MOTER_1_ID);
   prepJoint(joint2, MOTER_2_ID);
 
-  Serial.println("Hold robot STILL — calibrating gyro...");
+  Serial.println("Hold robot STILL - calibrating gyro...");
   calibrateGyro();
   initStateEstimate();
   Serial.printf("Gyro bias: %.3f %.3f %.3f\n", gyroBiasX, gyroBiasY, gyroBiasZ);
   Serial.println("Ready.");
+  Serial.println("H=stand R=release B=balance SPACE/K=kill");
+  Serial.println("T=motor test | 1/2/3/5/9=effort 0=stop -=reverse");
+  Serial.println("Tune live: type '<name> <value>' + Enter (e.g. kp 0.08), or 'list'");
+  printTunables();
 }
 
 // ==========================================================
-//  MAIN CONTROL LOOP — fixed rate
+//  MAIN CONTROL LOOP
 // ==========================================================
 void loop() {
+  readSerialCommands();
+
   static unsigned long lastControlUs = 0;
   unsigned long nowUs = micros();
 
   if (nowUs - lastControlUs >= CONTROL_US) {
     float dt = (nowUs - lastControlUs) / 1000000.0;
     lastControlUs = nowUs;
+    loopCounter++;
 
     updateState(dt);
 
-    // Control loop can go here
+    if (balanceEnabled &&
+        fabs(state.pitch - pitchSetpoint) > TIPOVER_LIMIT) {
+      balanceEnabled = false;
+      integralError = 0;
+    }
 
+    if (motorTestMode) {
+      lastEffort = motorTestEffort;
+      setWheelR(motorTestEffort);
+      setWheelL(motorTestEffort);
+    } else if (balanceEnabled) {
+      lastEffort = computeBalance(dt);
+      setWheelR(lastEffort);
+      setWheelL(lastEffort);
+    } else {
+      stopWheels();
+      integralError = 0;
+      lastEffort = 0.0;
+    }
+
+    // ---- burst logger: record every control tick while active ----
+    if (logging) {
+      if (logIdx < LOG_N) {
+        logBuf[logIdx].t      = (nowUs - logStartUs) / 1000000.0;
+        logBuf[logIdx].pitch  = state.pitch;
+        logBuf[logIdx].rate   = state.pitchRate;
+        logBuf[logIdx].rawEff = lastRawEffort;
+        logBuf[logIdx].eff    = lastEffort;
+        logBuf[logIdx].P      = lastP;
+        logBuf[logIdx].D      = lastD;
+        logBuf[logIdx].wR     = state.wheelVelR;
+        logBuf[logIdx].wL     = state.wheelVelL;
+        logIdx++;
+      } else {
+        logging = false;
+        dumpLog();
+      }
+    }
+  }
+
+  // ---- housekeeping ----
+  static unsigned long lastPoll = 0;
+  if (millis() - lastPoll >= 50) {
+    lastPoll = millis();
     pollJoint(joint1);
     pollJoint(joint2);
   }
 
-  // slower housekeeping (telemetry, controller input) can go here,
-  // gated by their own timers so they don't disturb the control loop
   static unsigned long lastPrint = 0;
-  if (millis() - lastPrint >= 100) {
+  if (millis() - lastPrint >= 50) {
     lastPrint = millis();
-    float ax,ay,az,gx,gy,gz;
-    imuReadRaw(ax,ay,az,gx,gy,gz);
-    Serial.printf("pitch=%.2f  pitchRate=%.1f\n", state.pitch, state.pitchRate);
+    const char* mode = motorTestMode ? "TEST" : (balanceEnabled ? "BAL" : "off");
+    Serial.printf("pitch=%.2f rate=%.1f P=%.2f D=%.2f rawEff=%.2f eff=%.2f wR=%.2f wL=%.2f | j1cmd=%.3f j1act=%.3f j2cmd=%.3f j2act=%.3f [%s]\n",
+                  state.pitch, state.pitchRate, lastP, lastD, lastRawEffort, lastEffort,
+                  state.wheelVelR, state.wheelVelL,
+                  standJ1, joint1.motor_rx_data.cur_angle,
+                  standJ2, joint2.motor_rx_data.cur_angle, mode);
+  }
+
+  static unsigned long lastRateCheck = 0;
+  static unsigned long lastLoopCount = 0;
+  if (millis() - lastRateCheck >= 2000) {
+    unsigned long rate = (loopCounter - lastLoopCount) / 2;
+    lastLoopCount = loopCounter;
+    lastRateCheck = millis();
+    Serial.printf(">>> loop rate: %lu Hz <<<\n", rate);
   }
 }

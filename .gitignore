@@ -1,0 +1,6 @@
+# Runtime capture output from tools/capture_serial.py
+logs/
+
+# Python
+__pycache__/
+*.pyc
