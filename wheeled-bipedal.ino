@@ -37,7 +37,12 @@ const int PWM_MAX  = (1 << PWM_RES) - 1;
 // 64 CPR pre-gearbox like the old motors - verify against the new
 // motor's datasheet if position/velocity numbers look off by a
 // constant factor.
-const float COUNTS_PER_OUTPUT_REV = 64.0 * 4.0 * 50.0;   // = 12800
+// The 37D "64 CPR" spec already includes 4x quadrature decoding (and
+// attachFullQuad also decodes 4x), so counts/output-rev = 64 * 50 = 3200.
+// (Was 64*4*50=12800, which double-counted quadrature and made every
+// reported wheel speed read 4x too low - confirmed by a full-effort spin
+// test reading 0.92 rev/s when the motor was actually doing ~3.7 rev/s.)
+const float COUNTS_PER_OUTPUT_REV = 64.0 * 50.0;   // = 3200
 
 const float CONTROL_HZ = 200.0;
 const unsigned long CONTROL_US = 1000000UL / 200;
@@ -96,30 +101,35 @@ float pitchSetpoint  = -4.0;
 float Kp = 0.05;
 float Kd = 0.05;
 float Ki = 0.0;
+float Kv = 0.0;        // wheel-velocity braking gain (opposes wheel spin to stop runaway; start 0, tune up)
 
-float DEADZONE = 0.14;   // measured wheel stiction point (effort where wheels just start moving)
+float DEADZONE = 0.0;  // feedforward stiction comp. Leave 0 for balancing: any nonzero value
+                       // injects a +/-DEADZONE bang-bang kick at the setpoint. Measured wheel
+                       // stiction is ~0.14 if ever needed as a drive-mode feedforward.
+
+float RATE_LP_ALPHA = 0.30;   // low-pass on gyro rate feeding the D term (0..1; lower = smoother, more lag)
 
 float integralError = 0.0;
 float lastEffort = 0.0;
 float lastRawEffort = 0.0;
-float lastP = 0.0, lastD = 0.0, lastI = 0.0;   // split-out PID terms for telemetry
+float lastP = 0.0, lastD = 0.0, lastI = 0.0, lastV = 0.0;   // split-out control terms for telemetry
 const float TIPOVER_LIMIT = 40.0;
 
 // ---- Burst data logger ('L' captures a 2.5 s full-rate trace as CSV) ----
 #define LOG_N 500
-struct LogSample { float t, pitch, rate, rawEff, eff, P, D, wR, wL; };
+struct LogSample { float t, pitch, rate, rawEff, eff, P, D, V, wR, wL; };
 LogSample logBuf[LOG_N];
 int  logIdx = 0;
 bool logging = false;
 unsigned long logStartUs = 0;
 
 void dumpLog() {
-  Serial.println("---- LOG BEGIN (t_s,pitch,rate,rawEff,eff,P,D,wR,wL) ----");
+  Serial.println("---- LOG BEGIN (t_s,pitch,rate,rawEff,eff,P,D,V,wR,wL) ----");
   for (int i = 0; i < logIdx; i++) {
-    Serial.printf("%.4f,%.3f,%.2f,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f\n",
+    Serial.printf("%.4f,%.3f,%.2f,%.4f,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f\n",
                   logBuf[i].t, logBuf[i].pitch, logBuf[i].rate,
                   logBuf[i].rawEff, logBuf[i].eff, logBuf[i].P, logBuf[i].D,
-                  logBuf[i].wR, logBuf[i].wL);
+                  logBuf[i].V, logBuf[i].wR, logBuf[i].wL);
   }
   Serial.println("---- LOG END ----");
 }
@@ -185,9 +195,19 @@ float computeBalance(float dt) {
   if (integralError < -50) integralError = -50;
   float I = Ki * integralError;
 
-  float effort = P + D + I;
+  // Wheel-velocity braking: opposes how fast the wheels are actually spinning.
+  // Pure pitch feedback lets the wheels accumulate speed and run away (drive one
+  // way, over-translate, throw the body past vertical). This term pulls effort
+  // back toward zero wheel speed so the robot settles instead of running off.
+  // Uses the correctly-scaled encoder velocity, lightly low-passed (it's quantized).
+  static float wheelVelFilt = 0.0f;
+  float avgVel = 0.5f * (state.wheelVelR + state.wheelVelL);
+  wheelVelFilt += 0.20f * (avgVel - wheelVelFilt);
+  float V = -Kv * wheelVelFilt;
+
+  float effort = P + D + I + V;
   lastRawEffort = effort;
-  lastP = P; lastD = D; lastI = I;
+  lastP = P; lastD = D; lastI = I; lastV = V;
 
   if (effort >  1.0) effort =  1.0;
   if (effort < -1.0) effort = -1.0;
@@ -208,11 +228,31 @@ void updateState(float dt) {
   gx -= gyroBiasX; gy -= gyroBiasY; gz -= gyroBiasZ;
 
   float gyroRate = gy;
-  float accAngle = accelPitch(ax, ay, az);
 
-  const float ALPHA = 0.98;
-  state.pitch     = ALPHA * (state.pitch + gyroRate * dt) + (1.0 - ALPHA) * accAngle;
-  state.pitchRate = gyroRate;
+  // --- Gyro-led complementary filter with accelerometer gating ---
+  // Pitch integrates the RAW gyro (no filter lag on the angle itself).
+  state.pitch += gyroRate * dt;
+
+  // Correct toward the accelerometer tilt ONLY when the measured acceleration
+  // is close to 1 g. During fast wheel moves the accelerometer also picks up
+  // the robot's horizontal acceleration, so atan2(ax,az) lies (it can even
+  // point the wrong way). Trusting it then drags the pitch estimate backwards
+  // and the controller chases a phantom angle -> runaway. Gating it keeps the
+  // estimate honest exactly when balancing needs it most.
+  const float ACC_TRUST_BAND = 0.20f;   // use accel only within 0.20 g of gravity-only
+  const float ACC_CORRECT    = 0.02f;   // correction strength (== old 1-ALPHA)
+  float accMag = sqrtf(ax*ax + ay*ay + az*az);   // in g
+  if (fabsf(accMag - 1.0f) < ACC_TRUST_BAND) {
+    float accAngle = accelPitch(ax, ay, az);
+    state.pitch += ACC_CORRECT * (accAngle - state.pitch);
+  }
+
+  // The D term needs a smoother rate: the raw gyro is too noisy to multiply by
+  // Kd without amplifying noise into full-throttle wheel commands. A light
+  // first-order low-pass keeps the lead (anticipation) while killing the jitter.
+  static float rateFilt = 0.0f;
+  rateFilt += RATE_LP_ALPHA * (gyroRate - rateFilt);
+  state.pitchRate = rateFilt;
 
   static int64_t lastC1 = 0, lastC2 = 0;
   int64_t c1 =  enc1.getCount();
@@ -351,6 +391,8 @@ TunableParam tunables[] = {
   {"kp",       &Kp},
   {"kd",       &Kd},
   {"ki",       &Ki},
+  {"kv",       &Kv},
+  {"ratelp",   &RATE_LP_ALPHA},
   {"deadzone", &DEADZONE},
   {"setpoint", &pitchSetpoint},
   {"standj1",  &standJ1},
@@ -541,6 +583,7 @@ void loop() {
         logBuf[logIdx].eff    = lastEffort;
         logBuf[logIdx].P      = lastP;
         logBuf[logIdx].D      = lastD;
+        logBuf[logIdx].V      = lastV;
         logBuf[logIdx].wR     = state.wheelVelR;
         logBuf[logIdx].wL     = state.wheelVelL;
         logIdx++;
@@ -563,8 +606,8 @@ void loop() {
   if (millis() - lastPrint >= 50) {
     lastPrint = millis();
     const char* mode = motorTestMode ? "TEST" : (balanceEnabled ? "BAL" : "off");
-    Serial.printf("pitch=%.2f rate=%.1f P=%.2f D=%.2f rawEff=%.2f eff=%.2f wR=%.2f wL=%.2f | j1cmd=%.3f j1act=%.3f j2cmd=%.3f j2act=%.3f [%s]\n",
-                  state.pitch, state.pitchRate, lastP, lastD, lastRawEffort, lastEffort,
+    Serial.printf("pitch=%.2f rate=%.1f P=%.2f D=%.2f V=%.2f rawEff=%.2f eff=%.2f wR=%.2f wL=%.2f | j1cmd=%.3f j1act=%.3f j2cmd=%.3f j2act=%.3f [%s]\n",
+                  state.pitch, state.pitchRate, lastP, lastD, lastV, lastRawEffort, lastEffort,
                   state.wheelVelR, state.wheelVelL,
                   standJ1, joint1.motor_rx_data.cur_angle,
                   standJ2, joint2.motor_rx_data.cur_angle, mode);
