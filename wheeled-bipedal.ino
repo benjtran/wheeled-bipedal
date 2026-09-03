@@ -237,7 +237,13 @@ void updateState(float dt) {
   imuReadRaw(ax,ay,az,gx,gy,gz);
   gx -= gyroBiasX; gy -= gyroBiasY; gz -= gyroBiasZ;
 
-  float gyroRate = gy;
+  // NOTE: gy is negated here. The IMU's gy has the OPPOSITE sign to the
+  // accelerometer-derived pitch direction, so during fast motion (when the
+  // complementary filter leans on the gyro) the estimate would invert and the
+  // controller would drive the wrong way -> it could hold gentle leans but
+  // never catch a real fall. Negating makes gyro agree with the accel at all
+  // speeds. (Confirmed: robot fell backward while logged pitch went negative.)
+  float gyroRate = -gy;
 
   // --- Gyro-led complementary filter with accelerometer gating ---
   // Pitch integrates the RAW gyro (no filter lag on the angle itself).
