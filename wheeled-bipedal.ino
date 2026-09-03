@@ -211,11 +211,13 @@ float computeBalance(float dt) {
   wheelVelFilt += 0.20f * (avgVel - wheelVelFilt);
   float V = -Kv * wheelVelFilt;
 
-  float effort = P + D + I + V;
+  // CTRL_SIGN flips only the pitch-based terms (P/D/I). The wheel-velocity brake
+  // V must keep its own sign so it always OPPOSES wheel speed regardless of the
+  // pitch-loop polarity (otherwise flipping the loop turns the brake into a
+  // wheel-speed accelerator -> runaway).
+  float effort = CTRL_SIGN * (P + D + I) + V;
   lastRawEffort = effort;
   lastP = P; lastD = D; lastI = I; lastV = V;
-
-  effort *= CTRL_SIGN;   // flip whole-loop polarity if inverted (set 'sign -1')
 
   if (effort >  1.0) effort =  1.0;
   if (effort < -1.0) effort = -1.0;
