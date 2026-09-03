@@ -109,6 +109,12 @@ float DEADZONE = 0.0;  // feedforward stiction comp. Leave 0 for balancing: any 
 
 float RATE_LP_ALPHA = 0.30;   // low-pass on gyro rate feeding the D term (0..1; lower = smoother, more lag)
 
+// Overall control-sign multiplier. If the closed loop drives AWAY from the fall
+// (robot dives off in one direction and diverges), the loop polarity is inverted
+// somewhere (pitch or drive direction); set this to -1 to flip the whole control
+// output at once. Live-tunable as "sign".
+float CTRL_SIGN = 1.0;
+
 float integralError = 0.0;
 float lastEffort = 0.0;
 float lastRawEffort = 0.0;
@@ -208,6 +214,8 @@ float computeBalance(float dt) {
   float effort = P + D + I + V;
   lastRawEffort = effort;
   lastP = P; lastD = D; lastI = I; lastV = V;
+
+  effort *= CTRL_SIGN;   // flip whole-loop polarity if inverted (set 'sign -1')
 
   if (effort >  1.0) effort =  1.0;
   if (effort < -1.0) effort = -1.0;
@@ -393,6 +401,7 @@ TunableParam tunables[] = {
   {"ki",       &Ki},
   {"kv",       &Kv},
   {"ratelp",   &RATE_LP_ALPHA},
+  {"sign",     &CTRL_SIGN},
   {"deadzone", &DEADZONE},
   {"setpoint", &pitchSetpoint},
   {"standj1",  &standJ1},
