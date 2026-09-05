@@ -62,6 +62,9 @@ struct RobotState {
 RobotState state;
 
 float gyroBiasX = 0, gyroBiasY = 0, gyroBiasZ = 0;
+float gyroBiasEst = 0.0;   // ONLINE residual pitch-gyro bias, learned from the accel while
+                           // near-upright (on top of the startup calibration); cancels the
+                           // slow drift that made the estimate read "level" while leaning.
 unsigned long loopCounter = 0;
 
 // ==========================================================
@@ -247,7 +250,7 @@ void updateState(float dt) {
   // controller would drive the wrong way -> it could hold gentle leans but
   // never catch a real fall. Negating makes gyro agree with the accel at all
   // speeds. (Confirmed: robot fell backward while logged pitch went negative.)
-  float gyroRate = -gy;
+  float gyroRate = -gy - gyroBiasEst;   // subtract the online-learned residual bias
 
   // --- Gyro-led complementary filter with accelerometer gating ---
   // Pitch integrates the RAW gyro (no filter lag on the angle itself).
@@ -266,7 +269,15 @@ void updateState(float dt) {
   float accMag = sqrtf(ax*ax + ay*ay + az*az);   // in g
   if (fabsf(accMag - 1.0f) < ACC_TRUST_BAND) {
     float accAngle = accelPitch(ax, ay, az);
-    state.pitch += ACC_CORRECT * (accAngle - state.pitch);
+    float aerr = accAngle - state.pitch;
+    state.pitch += ACC_CORRECT * aerr;      // fast proportional correction (unchanged)
+    // Slowly learn the residual gyro bias from the same error. This is the Mahony
+    // integral term: it drives the long-term drift to zero WITHOUT the noise that a
+    // big proportional accel gain adds. Time constant ~ seconds.
+    const float BIAS_KI = 0.30f;
+    gyroBiasEst -= BIAS_KI * aerr * dt;
+    if (gyroBiasEst >  5.0f) gyroBiasEst =  5.0f;   // clamp to +/-5 deg/s of learned bias
+    if (gyroBiasEst < -5.0f) gyroBiasEst = -5.0f;
   }
 
   // The D term needs a smoother rate: the raw gyro is too noisy to multiply by
