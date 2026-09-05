@@ -260,9 +260,9 @@ void updateState(float dt) {
   // and the controller chases a phantom angle -> runaway. Gating it keeps the
   // estimate honest exactly when balancing needs it most.
   const float ACC_TRUST_BAND = 0.20f;   // use accel only within 0.20 g of gravity-only
-  const float ACC_CORRECT    = 0.05f;   // correction strength; raised from 0.02 to null
-                                        // residual gyro-bias drift while near-upright (the
-                                        // slow lean that made it fall after a few seconds)
+  const float ACC_CORRECT    = 0.02f;   // correction strength. (0.05 was tried to fight gyro-bias
+                                        // drift but it leaned too hard on the noisy accel and made
+                                        // the estimate oscillate; use a small ki for the drift instead.)
   float accMag = sqrtf(ax*ax + ay*ay + az*az);   // in g
   if (fabsf(accMag - 1.0f) < ACC_TRUST_BAND) {
     float accAngle = accelPitch(ax, ay, az);
