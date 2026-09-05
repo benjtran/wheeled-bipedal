@@ -118,6 +118,11 @@ float RATE_LP_ALPHA = 0.30;   // low-pass on gyro rate feeding the D term (0..1;
 // output at once. Live-tunable as "sign".
 float CTRL_SIGN = 1.0;
 
+// Dead-band (degrees). When the robot is within +/-PITCH_DB of the setpoint AND
+// turning slowly, command zero effort so it stops fidgeting back and forth through
+// the gearbox backlash (which sustains the jitter). 0 = off. Live-tunable 'pitchdb'.
+float PITCH_DB = 0.0;
+
 float integralError = 0.0;
 float lastEffort = 0.0;
 float lastRawEffort = 0.0;
@@ -225,6 +230,11 @@ float computeBalance(float dt) {
   float effort = CTRL_SIGN * (P + D + I) + V;
   lastRawEffort = effort;
   lastP = P; lastD = D; lastI = I; lastV = V;
+
+  // Backlash dead-band: if already close to balance and moving slowly, stop driving
+  // so the wheels don't buzz back and forth across the gear slack.
+  if (PITCH_DB > 0.0f && fabsf(error) < PITCH_DB && fabsf(state.pitchRate) < 20.0f)
+    effort = 0.0f;
 
   if (effort >  1.0) effort =  1.0;
   if (effort < -1.0) effort = -1.0;
@@ -433,6 +443,7 @@ TunableParam tunables[] = {
   {"kv",       &Kv},
   {"ratelp",   &RATE_LP_ALPHA},
   {"sign",     &CTRL_SIGN},
+  {"pitchdb",  &PITCH_DB},
   {"deadzone", &DEADZONE},
   {"setpoint", &pitchSetpoint},
   {"standj1",  &standJ1},
