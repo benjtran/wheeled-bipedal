@@ -275,9 +275,15 @@ void updateState(float dt) {
     // integral term: it drives the long-term drift to zero WITHOUT the noise that a
     // big proportional accel gain adds. Time constant ~ seconds.
     const float BIAS_KI = 0.30f;
-    gyroBiasEst -= BIAS_KI * aerr * dt;
-    if (gyroBiasEst >  5.0f) gyroBiasEst =  5.0f;   // clamp to +/-5 deg/s of learned bias
-    if (gyroBiasEst < -5.0f) gyroBiasEst = -5.0f;
+    // Only learn the bias when NEARLY STILL. During the balancing wobble the accel is
+    // motion-contaminated, so learning then teaches a wrong bias that accumulates over
+    // a few seconds and eventually drops the robot ("turns off"). Learn it while
+    // settling (before balance), then hold it steady through the wobble.
+    if (fabsf(gyroRate) < 3.0f) {
+      gyroBiasEst -= BIAS_KI * aerr * dt;
+      if (gyroBiasEst >  5.0f) gyroBiasEst =  5.0f;   // clamp to +/-5 deg/s of learned bias
+      if (gyroBiasEst < -5.0f) gyroBiasEst = -5.0f;
+    }
   }
 
   // The D term needs a smoother rate: the raw gyro is too noisy to multiply by
@@ -641,8 +647,8 @@ void loop() {
   if (millis() - lastPrint >= 100) {
     lastPrint = millis();
     const char* mode = motorTestMode ? "TEST" : (balanceEnabled ? "BAL" : "off");
-    Serial.printf("pitch=%.2f rate=%.1f P=%.2f D=%.2f V=%.2f rawEff=%.2f eff=%.2f wR=%.2f wL=%.2f | j1cmd=%.3f j1act=%.3f j2cmd=%.3f j2act=%.3f [%s]\n",
-                  state.pitch, state.pitchRate, lastP, lastD, lastV, lastRawEffort, lastEffort,
+    Serial.printf("pitch=%.2f rate=%.1f bias=%.2f P=%.2f D=%.2f V=%.2f rawEff=%.2f eff=%.2f wR=%.2f wL=%.2f | j1cmd=%.3f j1act=%.3f j2cmd=%.3f j2act=%.3f [%s]\n",
+                  state.pitch, state.pitchRate, gyroBiasEst, lastP, lastD, lastV, lastRawEffort, lastEffort,
                   state.wheelVelR, state.wheelVelL,
                   standJ1, joint1.motor_rx_data.cur_angle,
                   standJ2, joint2.motor_rx_data.cur_angle, mode);
