@@ -207,7 +207,11 @@ float computeBalance(float dt) {
   // back toward zero wheel speed so the robot settles instead of running off.
   // Uses the correctly-scaled encoder velocity, lightly low-passed (it's quantized).
   static float wheelVelFilt = 0.0f;
-  float avgVel = 0.5f * (state.wheelVelR + state.wheelVelL);
+  // Right encoder (enc1, pins 16/17) is currently dead (reads ~0). Both wheels
+  // get identical effort and spin together, so the LEFT wheel speed alone is a
+  // valid proxy for robot velocity. Revert to 0.5*(wheelVelR+wheelVelL) once the
+  // right encoder wiring is fixed.
+  float avgVel = state.wheelVelL;
   wheelVelFilt += 0.20f * (avgVel - wheelVelFilt);
   float V = -Kv * wheelVelFilt;
 
