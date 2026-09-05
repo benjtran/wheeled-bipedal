@@ -520,6 +520,7 @@ void readSerialCommands() {
 //  SETUP
 // ==========================================================
 void setup() {
+  Serial.setTxBufferSize(1024);   // large TX buffer so the status print never blocks the 200 Hz loop
   Serial.begin(115200);
   delay(500);
 
@@ -613,14 +614,14 @@ void loop() {
 
   // ---- housekeeping ----
   static unsigned long lastPoll = 0;
-  if (millis() - lastPoll >= 50) {
+  if (millis() - lastPoll >= 100) {
     lastPoll = millis();
     pollJoint(joint1);
     pollJoint(joint2);
   }
 
   static unsigned long lastPrint = 0;
-  if (millis() - lastPrint >= 50) {
+  if (millis() - lastPrint >= 100) {
     lastPrint = millis();
     const char* mode = motorTestMode ? "TEST" : (balanceEnabled ? "BAL" : "off");
     Serial.printf("pitch=%.2f rate=%.1f P=%.2f D=%.2f V=%.2f rawEff=%.2f eff=%.2f wR=%.2f wL=%.2f | j1cmd=%.3f j1act=%.3f j2cmd=%.3f j2act=%.3f [%s]\n",
