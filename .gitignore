@@ -4,3 +4,7 @@ logs/
 # Python
 __pycache__/
 *.pyc
+
+
+# Design/docs artifacts - keep the repo code-only
+*.html
