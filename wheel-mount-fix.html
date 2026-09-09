@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wheel Mount Fix — Counterbored Adapter Drive</title>
+<style>
+  :root {
+    --shaft:  #8a8a8a;
+    --brass:  #b8860b;
+    --adapter:#2e7d32;
+    --wheel:  #c62828;
+    --disc:   #7b1fa2;
+    --screw:  #1565c0;
+    --hex:    #ef6c00;
+    --bg:     #f5f6f8;
+    --card:   #ffffff;
+    --ink:    #1b1b1b;
+    --muted:  #5a5a5a;
+    --good:   #2e7d32;
+    --bad:    #c62828;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: "Segoe UI", system-ui, Arial, sans-serif;
+    background: var(--bg); color: var(--ink); line-height: 1.5; padding: 24px;
+  }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1.12rem; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+    gap: 20px; max-width: 1220px;
+  }
+  .card {
+    background: var(--card); border-radius: 12px; padding: 18px 20px 22px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.08); border-top: 5px solid #ccc;
+  }
+  .card.current { border-top-color: var(--bad); }
+  .card.fixed   { border-top-color: var(--good); }
+  .tag {
+    display: inline-block; font-size: .72rem; font-weight: 700;
+    letter-spacing: .04em; text-transform: uppercase; padding: 3px 9px;
+    border-radius: 999px; margin-bottom: 8px;
+  }
+  .tag.bad  { background: #fdecea; color: var(--bad); }
+  .tag.good { background: #e7f4e8; color: var(--good); }
+  svg { width: 100%; height: auto; display: block; margin: 4px 0 10px; }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 12px 18px;
+    font-size: .82rem; margin: 14px 0 6px; max-width: 1220px;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  ul { margin: 8px 0 0; padding-left: 18px; }
+  li { margin: 4px 0; }
+  .note {
+    background: #fff8e1; border-left: 4px solid var(--hex);
+    padding: 10px 14px; border-radius: 6px; margin: 20px 0 0;
+    max-width: 1220px; font-size: .9rem;
+  }
+  .caption { font-size:.78rem; color:var(--muted); margin: 2px 0 0; }
+  em { font-style: normal; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Wheel coupling: counterbored adapter — why it slips &amp; the fix</h1>
+  <p class="sub">Section side view (matches your description) + end-on view looking down the axle.
+     Screw enters from the outer/front face and threads into the brass coupler.</p>
+
+  <div class="legend">
+    <span><span class="sw" style="background:#8a8a8a"></span> Motor shaft</span>
+    <span><span class="sw" style="background:#b8860b"></span> Brass hex coupler</span>
+    <span><span class="sw" style="background:#2e7d32"></span> Hex adapter (printed)</span>
+    <span><span class="sw" style="background:#7b1fa2"></span> Front disc (printed)</span>
+    <span><span class="sw" style="background:#c62828"></span> Wheel (counterbored)</span>
+    <span><span class="sw" style="background:#1565c0"></span> Screw</span>
+    <span><span class="sw" style="background:#ef6c00"></span> New hex keying</span>
+  </div>
+
+  <div class="grid">
+
+    <!-- ============ CURRENT ============ -->
+    <div class="card current">
+      <span class="tag bad">Current — slips</span>
+      <h2>Adapter has round OD in a round counterbore</h2>
+
+      <!-- SIDE SECTION VIEW -->
+      <svg viewBox="0 0 460 250" role="img" aria-label="Current design side section">
+        <line x1="0" y1="125" x2="460" y2="125" stroke="#bbb" stroke-dasharray="6 5" stroke-width="1"/>
+        <text x="6" y="119" font-size="9" fill="#999">axis</text>
+
+        <!-- motor shaft -->
+        <rect x="8" y="105" width="60" height="40" fill="#8a8a8a"/>
+        <text x="14" y="129" font-size="9" fill="#fff">MOTOR</text>
+
+        <!-- brass hex coupler on shaft, extends toward wheel -->
+        <rect x="68" y="112" width="150" height="26" fill="#b8860b"/>
+        <text x="86" y="106" font-size="9" fill="#b8860b">brass hex coupler (threaded center)</text>
+
+        <!-- WHEEL: big block with central through-hole + counterbore each side -->
+        <!-- upper wheel body -->
+        <rect x="205" y="30" width="90" height="66" fill="#c62828" opacity="0.85"/>
+        <!-- lower wheel body -->
+        <rect x="205" y="154" width="90" height="66" fill="#c62828" opacity="0.85"/>
+        <text x="300" y="42" font-size="10" fill="#c62828">wheel body</text>
+        <text x="210" y="24" font-size="9" fill="#c62828">counterbore both faces</text>
+
+        <!-- motor-side counterbore: hex adapter (round OD here) -->
+        <rect x="205" y="96" width="45" height="58" fill="#2e7d32"/>
+        <text x="150" y="176" font-size="9" fill="#2e7d32">hex adapter</text>
+        <line x1="205" y1="170" x2="227" y2="150" stroke="#2e7d32" stroke-width="1"/>
+
+        <!-- front-side counterbore: plain disc -->
+        <rect x="250" y="96" width="45" height="58" fill="#7b1fa2"/>
+        <text x="300" y="205" font-size="9" fill="#7b1fa2">front disc</text>
+        <line x1="295" y1="150" x2="315" y2="196" stroke="#7b1fa2" stroke-width="1"/>
+
+        <!-- screw: from front (right), through disc + hole, threads into brass coupler -->
+        <rect x="150" y="120" width="200" height="10" fill="#1565c0"/>
+        <rect x="345" y="108" width="14" height="34" rx="4" fill="#1565c0"/>
+        <text x="330" y="104" font-size="9" fill="#1565c0">screw head (front)</text>
+
+        <!-- slip indicator: adapter OD vs counterbore -->
+        <path d="M250 70 a24 24 0 1 1 -16 7" fill="none" stroke="#c62828" stroke-width="2.5"/>
+        <polygon points="234,78 228,64 245,68" fill="#c62828"/>
+        <text x="250" y="60" font-size="10" fill="#c62828" font-weight="700">wheel spins around adapter ✗</text>
+      </svg>
+      <p class="caption">The hex keys the adapter to the <em>coupler</em>. But the adapter's round OD only sits in the wheel's round counterbore — that hop is friction-only.</p>
+
+      <!-- END VIEW -->
+      <svg viewBox="0 0 460 160" role="img" aria-label="Current end view">
+        <text x="0" y="14" font-size="10" fill="#5a5a5a">End-on view (down the axle):</text>
+        <!-- wheel counterbore = big circle -->
+        <circle cx="150" cy="90" r="58" fill="#c62828" opacity="0.85"/>
+        <!-- adapter OD = round -->
+        <circle cx="150" cy="90" r="40" fill="#2e7d32"/>
+        <!-- hex hole in adapter (brass coupler) -->
+        <polygon points="150,66 171,78 171,102 150,114 129,102 129,78" fill="#b8860b"/>
+        <circle cx="150" cy="90" r="6" fill="#1565c0"/>
+        <text x="108" y="162" font-size="9" fill="#5a5a5a">round OD in round bore</text>
+
+        <path d="M150 32 a58 58 0 0 1 50 30" fill="none" stroke="#c62828" stroke-width="2"/>
+        <polygon points="200,62 202,48 187,55" fill="#c62828"/>
+
+        <text x="245" y="66" font-size="11" fill="#c62828" font-weight="700">Adapter OD ↔ wheel:</text>
+        <text x="245" y="86" font-size="11" fill="#c62828" font-weight="700">round, no corners.</text>
+        <text x="245" y="112" font-size="10" fill="#5a5a5a">Only the screw's axial clamp</text>
+        <text x="245" y="128" font-size="10" fill="#5a5a5a">friction resists rotation —</text>
+        <text x="245" y="144" font-size="10" fill="#5a5a5a">marginal, walks loose.</text>
+      </svg>
+
+      <ul>
+        <li>Hex bore keys adapter → <em>coupler</em> ✓ (that's why both adapters stay locked to the motor).</li>
+        <li>Adapter OD → <em>wheel counterbore</em> is round-on-round = friction only ✗ — the wheel spins around the adapter.</li>
+        <li>Front disc is just a screw seat; the screw clamps axially, which can't stop rotation.</li>
+      </ul>
+    </div>
+
+    <!-- ============ FIXED ============ -->
+    <div class="card fixed">
+      <span class="tag good">Proposed fix — positive drive</span>
+      <h2>Make the adapter OD + counterbore hex</h2>
+
+      <!-- SIDE SECTION VIEW -->
+      <svg viewBox="0 0 460 250" role="img" aria-label="Proposed design side section">
+        <line x1="0" y1="125" x2="460" y2="125" stroke="#bbb" stroke-dasharray="6 5" stroke-width="1"/>
+        <text x="6" y="119" font-size="9" fill="#999">axis</text>
+
+        <rect x="8" y="105" width="60" height="40" fill="#8a8a8a"/>
+        <text x="14" y="129" font-size="9" fill="#fff">MOTOR</text>
+
+        <rect x="68" y="112" width="150" height="26" fill="#b8860b"/>
+        <text x="86" y="106" font-size="9" fill="#b8860b">brass hex coupler</text>
+
+        <rect x="205" y="30" width="90" height="66" fill="#c62828" opacity="0.85"/>
+        <rect x="205" y="154" width="90" height="66" fill="#c62828" opacity="0.85"/>
+        <text x="300" y="42" font-size="10" fill="#c62828">wheel body</text>
+        <text x="200" y="24" font-size="9" fill="#ef6c00">hex counterbore (motor side)</text>
+
+        <!-- hex adapter now keyed to wheel: orange outline on the seat -->
+        <rect x="205" y="96" width="45" height="58" fill="#2e7d32"/>
+        <rect x="205" y="96" width="45" height="58" fill="none" stroke="#ef6c00" stroke-width="4"/>
+        <line x1="205" y1="103" x2="250" y2="103" stroke="#ef6c00" stroke-width="2"/>
+        <line x1="205" y1="147" x2="250" y2="147" stroke="#ef6c00" stroke-width="2"/>
+        <text x="150" y="176" font-size="9" fill="#2e7d32">hex adapter (hex OD)</text>
+        <line x1="205" y1="170" x2="227" y2="150" stroke="#2e7d32" stroke-width="1"/>
+
+        <rect x="250" y="96" width="45" height="58" fill="#7b1fa2"/>
+        <text x="300" y="205" font-size="9" fill="#7b1fa2">front disc</text>
+        <line x1="295" y1="150" x2="315" y2="196" stroke="#7b1fa2" stroke-width="1"/>
+
+        <rect x="150" y="120" width="200" height="10" fill="#1565c0"/>
+        <rect x="345" y="108" width="14" height="34" rx="4" fill="#1565c0"/>
+        <text x="325" y="104" font-size="9" fill="#1565c0">screw = axial only</text>
+
+        <text x="248" y="66" font-size="10" fill="#2e7d32" font-weight="700">wheel + adapter locked ✓</text>
+      </svg>
+      <p class="caption">The adapter's <em>outer</em> shape and the wheel's counterbore are now both hex — torque flows coupler → adapter → wheel entirely through flats.</p>
+
+      <!-- END VIEW -->
+      <svg viewBox="0 0 460 160" role="img" aria-label="Proposed end view">
+        <text x="0" y="14" font-size="10" fill="#5a5a5a">End-on view (down the axle):</text>
+        <!-- wheel material -->
+        <circle cx="150" cy="90" r="58" fill="#c62828" opacity="0.85"/>
+        <!-- hex counterbore -->
+        <polygon points="150,44 190,67 190,113 150,136 110,113 110,67" fill="#ef6c00"/>
+        <!-- hex adapter body -->
+        <polygon points="150,50 185,70 185,110 150,130 115,110 115,70" fill="#2e7d32"/>
+        <!-- hex hole (brass coupler) -->
+        <polygon points="150,68 169,79 169,101 150,112 131,101 131,79" fill="#b8860b"/>
+        <circle cx="150" cy="90" r="6" fill="#1565c0"/>
+        <text x="104" y="158" font-size="9" fill="#5a5a5a">hex OD in hex counterbore</text>
+
+        <text x="245" y="66" font-size="11" fill="#2e7d32" font-weight="700">Flats bear on flats →</text>
+        <text x="245" y="86" font-size="11" fill="#2e7d32" font-weight="700">geometry carries torque.</text>
+        <text x="245" y="112" font-size="10" fill="#5a5a5a">Nested hexes: coupler → adapter</text>
+        <text x="245" y="128" font-size="10" fill="#5a5a5a">→ wheel, all keyed. Friction</text>
+        <text x="245" y="144" font-size="10" fill="#5a5a5a">no longer matters.</text>
+      </svg>
+
+      <ul>
+        <li>Reprint the adapter with a <strong>hex (or double-D) outer profile</strong>; cut the wheel's motor-side <strong>counterbore to match</strong>.</li>
+        <li>Now it's nested hexes: coupler → adapter → wheel — every hop keyed.</li>
+        <li>Screw returns to axial retention only.</li>
+        <li>Print: <strong>4+ perimeters</strong>, <strong>60–100% infill</strong>, layer lines <strong>perpendicular to the axle</strong> so the flats don't shear along a layer.</li>
+        <li>Add ~<strong>0.2 mm</strong> flat-to-flat clearance so it presses in without cracking the wheel.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong>No-reprint retrofits</strong> (do <em>both</em> wheels, powered down):
+    <ul>
+      <li><strong>Anti-rotation pins:</strong> drill 2–3 holes straddling the adapter/counterbore seam and drop in short pins or filament — cheap and strong in shear.</li>
+      <li><strong>Radial set screw:</strong> tap a hole through the wheel rim into the adapter OD (onto a filed flat).</li>
+      <li><strong>Epoxy</strong> the adapter into its counterbore if it never needs to separate (roughen both faces first).</li>
+    </ul>
+    The hex counterbore is the permanent fix; retrofits get you rolling tonight.
+  </div>
+</body>
+</html>
